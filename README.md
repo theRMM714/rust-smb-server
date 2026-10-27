@@ -1,3 +1,10 @@
+> [!NOTE]
+> 本仓 fork 自 [paltaio/rust-smb-server](https://github.com/paltaio/rust-smb-server)（MIT）。
+> 唯一目的：给 [Solomni](https://github.com/theRMM714/Solomni) 的虚拟机档提供 Windows 上可用的匿名共享
+> helper（`smbd`）及其 release 构建。上游代码不改，发版编号独立；差异、同步与发版见 [FORK.md](FORK.md)。
+
+---
+
 # rust-smb-server
 
 SMB server in Rust.
