@@ -1,0 +1,43 @@
+# 本仓相对上游 paltaio/rust-smb-server 只新增文件，不改上游文件。
+# 上游只发 crate、不发预编译产物；这里在 Windows 上构建 Solomni 用的 smbd helper。
+name: release-windows
+
+on:
+  push:
+    tags: ['smbd-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: '1.95'
+
+      - name: build smbd
+        run: cargo build --release --bin smbd --target x86_64-pc-windows-msvc
+
+      - name: stage asset and checksum
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'asset'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $exe = Join-Path $dir 'smbd-windows-x86_64.exe'
+          Copy-Item 'target/x86_64-pc-windows-msvc/release/smbd.exe' $exe
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  smbd-windows-x86_64.exe" | Out-File -Encoding ascii (Join-Path $dir 'smbd-windows-x86_64.exe.sha256')
+
+      - name: attach to release
+        if: startsWith(github.ref, 'refs/tags/smbd-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            ${{ runner.temp }}/asset/smbd-windows-x86_64.exe
+            ${{ runner.temp }}/asset/smbd-windows-x86_64.exe.sha256
