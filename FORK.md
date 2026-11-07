@@ -16,7 +16,7 @@
   - `.github/workflows/release-windows.yml`：在 `windows-latest` 构建并发布 `smbd-windows-x86_64.exe`；
   - `FORK.md`：本文件。
 
-基准是上游 `v0.7.0`（`ac13f30`）。Windows 支持（定位 IO、`unlink` 目录识别、Windows CI）已经在上游，
+基准是上游 `v0.9.1`（`c2954f3`）。Windows 支持（定位 IO、`unlink` 目录识别、Windows CI）已经在上游，
 本仓不再维护任何上游补丁。
 
 ## 同步上游
