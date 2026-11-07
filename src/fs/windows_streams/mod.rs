@@ -2,7 +2,8 @@
 //!
 //! Each named stream is an NTFS alternate data stream of its file or
 //! directory, opened with `NtCreateFile` relative to a handle of the file
-//! that cap-std opened inside the share, under the name `:name:$DATA`. A
+//! that the rooted layer opened inside the share, under the name
+//! `:name:$DATA`. A
 //! stream name holds no `\`, and the open does not follow reparse points,
 //! so it cannot leave that file. NTFS compares stream names by their
 //! uppercase forms and keeps the spelling a stream was made with; a stream
@@ -12,31 +13,28 @@
 use std::fs::File;
 use std::io;
 use std::os::windows::fs::FileExt as _;
-use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
+use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::fs::rooted::{Dir, Metadata, OpenOptions as CapOpenOptions, nt};
 use async_trait::async_trait;
 use bytes::Bytes;
-use cap_std::fs::{Dir, Metadata, OpenOptions as CapOpenOptions};
 use tokio::task::spawn_blocking;
 use tracing::debug;
-use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT,
     FILE_OVERWRITE, FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT, FileStreamInformation,
-    NtCreateFile, NtQueryInformationFile,
+    NtQueryInformationFile,
 };
-use windows_sys::Win32::Foundation::{
-    HANDLE, NTSTATUS, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
-};
+use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
-    FILE_DISPOSITION_INFO, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES,
-    FILE_READ_DATA, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_STANDARD_INFO, FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo, FileDispositionInfo,
-    FileRenameInfo, FileStandardInfo, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
-    SYNCHRONIZE, SetFileInformationByHandle,
+    DELETE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_DISPOSITION_INFO,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_RENAME_INFO,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
+    FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo, FileDispositionInfo, FileRenameInfo,
+    FileStandardInfo, GetFileInformationByHandleEx, GetVolumeInformationByHandleW, SYNCHRONIZE,
+    SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -89,13 +87,6 @@ const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 // ---------------------------------------------------------------------------
 // Host calls
 // ---------------------------------------------------------------------------
-
-/// The error an NTSTATUS stands for.
-fn nt_error(status: NTSTATUS) -> io::Error {
-    // SAFETY: a pure conversion of a status code.
-    let code = unsafe { RtlNtStatusToDosError(status) };
-    io::Error::from_raw_os_error(code as i32)
-}
 
 /// The error a stream request answers for `e`. A volume without named
 /// streams refuses access: a stream request must not fail with
@@ -190,7 +181,7 @@ fn open_relative(
     share: u32,
     disposition: u32,
 ) -> io::Result<(File, usize)> {
-    nt_open(
+    nt::nt_open(
         base.as_raw_handle() as HANDLE,
         object_name(stream),
         access,
@@ -198,60 +189,6 @@ fn open_relative(
         disposition,
         FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
     )
-}
-
-/// Opens `name` relative to the open handle `root` with `access`, `share`,
-/// `disposition` and `options`. Returns the handle and what the open did.
-fn nt_open(
-    root: HANDLE,
-    mut name: Vec<u16>,
-    access: u32,
-    share: u32,
-    disposition: u32,
-    options: u32,
-) -> io::Result<(File, usize)> {
-    let bytes = u16::try_from(name.len() * 2).map_err(|_| io::ErrorKind::InvalidFilename)?;
-    let unicode = UNICODE_STRING {
-        Length: bytes,
-        MaximumLength: bytes,
-        Buffer: name.as_mut_ptr(),
-    };
-    let attributes = OBJECT_ATTRIBUTES {
-        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
-        RootDirectory: root,
-        ObjectName: &unicode,
-        Attributes: OBJ_CASE_INSENSITIVE,
-        SecurityDescriptor: std::ptr::null(),
-        SecurityQualityOfService: std::ptr::null(),
-    };
-    let mut handle: HANDLE = std::ptr::null_mut();
-    let mut status_block = IO_STATUS_BLOCK::default();
-    // SAFETY: every pointer refers to a live local that outlives the call:
-    // `attributes` names `unicode`, whose buffer is `name`, and the root
-    // is an open handle the caller holds. The call writes only `handle`
-    // and `status_block`.
-    let status = unsafe {
-        NtCreateFile(
-            &mut handle,
-            access | SYNCHRONIZE,
-            &attributes,
-            &mut status_block,
-            std::ptr::null(),
-            FILE_ATTRIBUTE_NORMAL,
-            share,
-            disposition,
-            options,
-            std::ptr::null(),
-            0,
-        )
-    };
-    if status < 0 {
-        return Err(nt_error(status));
-    }
-    // SAFETY: the call succeeded, so `handle` is an open handle that
-    // nothing else owns.
-    let file = unsafe { File::from_raw_handle(handle as _) };
-    Ok((file, status_block.Information))
 }
 
 /// The disposition of `intent`.
@@ -388,7 +325,7 @@ pub(super) fn list(file: &File) -> io::Result<Vec<StreamInfo>> {
             status => {
                 return match volume_of(file.as_raw_handle() as HANDLE) {
                     Some((flags, _)) if flags & FILE_NAMED_STREAMS == 0 => Ok(Vec::new()),
-                    _ => Err(nt_error(status)),
+                    _ => Err(nt::nt_error(status)),
                 };
             }
         }
@@ -471,16 +408,15 @@ pub(super) fn peek_entries(
 
 /// Opens the entry `name` of `dir` for its attributes, to open its streams
 /// through, without following a reparse point there. A symlink or a
-/// junction is opened through cap-std instead, which follows it only to a
-/// target below `dir`; other reparse points, such as deduplicated,
+/// junction is opened through the rooted layer instead, which follows it
+/// only to a target below `dir`; other reparse points, such as deduplicated,
 /// compressed or cloud files, keep the first handle.
 fn open_entry(dir: &Dir, name: &str) -> io::Result<File> {
-    use cap_primitives::fs::OpenOptionsExt as _;
     use std::os::windows::io::AsHandle as _;
     if !is_valid_component(name) {
         return Err(io::ErrorKind::InvalidFilename.into());
     }
-    let (file, _) = nt_open(
+    let (file, _) = nt::nt_open(
         dir.as_handle().as_raw_handle() as HANDLE,
         name.encode_utf16().collect(),
         FILE_READ_ATTRIBUTES,
@@ -565,7 +501,6 @@ impl Place {
     /// streams through. A file at `rel` whose id is not `id` is not found,
     /// unless `id` is `0`.
     fn base(&self, rel: &Path, id: u64) -> io::Result<(File, Metadata)> {
-        use cap_primitives::fs::OpenOptionsExt as _;
         let mut opts = CapOpenOptions::new();
         opts.read(true)
             .access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)

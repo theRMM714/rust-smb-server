@@ -2,7 +2,7 @@
 //! read from one inotify instance per backend.
 //!
 //! A directory is watched through its open handle: the watch is added on
-//! `/proc/self/fd/N` of the directory descriptor cap-std opened, which the
+//! `/proc/self/fd/N` of the directory descriptor the rooted layer opened, which the
 //! kernel resolves to that inode, so no path is looked up again and no
 //! symlink in the share is followed. Only the directory's own entries are
 //! watched; inotify does not reach below them.

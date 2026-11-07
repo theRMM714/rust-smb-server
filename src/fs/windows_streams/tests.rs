@@ -19,7 +19,7 @@ fn backend() -> (TempDir, LocalFsBackend) {
 
 /// True if `td` is on ReFS, which cannot rename streams.
 fn on_refs(td: &TempDir) -> bool {
-    let dir = Dir::open_ambient_dir(td.path(), cap_std::ambient_authority()).unwrap();
+    let dir = Dir::open_ambient_dir(td.path(), crate::fs::rooted::ambient_authority()).unwrap();
     volume(&dir).unwrap().refs
 }
 
@@ -560,7 +560,8 @@ async fn renames_on_refs_are_refused_before_anything_changes() {
     let (td, backend) = backend();
     create(&backend, "f.txt", "a", b"data").await;
     create(&backend, "f.txt", "b", b"").await;
-    let root = Arc::new(Dir::open_ambient_dir(td.path(), cap_std::ambient_authority()).unwrap());
+    let root =
+        Arc::new(Dir::open_ambient_dir(td.path(), crate::fs::rooted::ambient_authority()).unwrap());
     let place = Place {
         root,
         root_dev: None,
@@ -805,10 +806,10 @@ async fn a_junction_out_of_the_share_has_no_streams() {
     assert!(td.path().join("j").is_dir());
     // The junction has a stream of its own, which only a peek that kept
     // the junction itself would find.
-    let dir = Dir::open_ambient_dir(td.path(), cap_std::ambient_authority()).unwrap();
+    let dir = Dir::open_ambient_dir(td.path(), crate::fs::rooted::ambient_authority()).unwrap();
     {
         use std::os::windows::io::AsHandle as _;
-        let (junction, _) = nt_open(
+        let (junction, _) = super::nt::nt_open(
             dir.as_handle().as_raw_handle() as HANDLE,
             "j".encode_utf16().collect(),
             FILE_READ_ATTRIBUTES,

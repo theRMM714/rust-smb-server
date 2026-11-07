@@ -34,8 +34,6 @@ async-trait = "0.1"
 tracing = "0.1"
 thiserror = "1"
 uuid = { version = "1.10", features = ["v4"] }
-cap-std = "3"
-cap-primitives = "~3.4"
 
 # RustCrypto family
 hmac  = "0.12"
@@ -57,7 +55,6 @@ thiserror.workspace = true
 uuid.workspace = true
 binrw = { workspace = true }
 getrandom = "0.4"
-cap-std = { workspace = true, optional = true }
 hmac.workspace = true
 sha2.workspace = true
 md-5.workspace = true
@@ -71,8 +68,7 @@ socket2 = "0.6"
 if-addrs = { version = "0.15", optional = true, features = ["link-local"] }
 
 [target.'cfg(windows)'.dependencies]
-cap-primitives = { workspace = true, optional = true }
-windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO"], optional = true }
+windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs"], optional = true }
@@ -87,7 +83,7 @@ zbus = { version = "6.2", default-features = false, features = ["tokio"], option
 
 [features]
 default = ["localfs"]
-localfs = ["dep:cap-std", "dep:cap-primitives", "dep:rustix", "dep:windows-sys"]
+localfs = ["dep:rustix", "dep:windows-sys"]
 discovery = [
     "dep:mdns-sd",
     "dep:zbus",
@@ -99,6 +95,9 @@ discovery = [
     "windows-sys/Win32_NetworkManagement_Dns",
     "windows-sys/Win32_System_SystemInformation",
 ]
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

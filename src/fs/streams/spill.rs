@@ -41,7 +41,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::{FileExt as _, MetadataExt as _};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
 
-use cap_std::fs::Dir;
+use crate::fs::rooted::Dir;
 use rustix::fs::{AtFlags, Mode, OFlags, StatxFlags, XattrFlags};
 use rustix::io::Errno;
 use tracing::{debug, warn};

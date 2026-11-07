@@ -1,4 +1,5 @@
-//! Local-filesystem [`ShareBackend`] for `smb-server`, sandboxed via `cap-std`.
+//! Local-filesystem [`ShareBackend`] for `smb-server`, sandboxed by a rooted
+//! directory layer.
 
 #[cfg(target_os = "linux")]
 mod eas;
@@ -9,6 +10,7 @@ mod local;
 mod macos_streams;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod open_streams;
+mod rooted;
 #[cfg(target_os = "linux")]
 mod streams;
 #[cfg(windows)]

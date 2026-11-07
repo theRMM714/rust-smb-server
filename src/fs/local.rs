@@ -1,16 +1,16 @@
 //! `LocalFsBackend`: a `ShareBackend` backed by a real on-disk directory.
 //!
-//! The share root is opened once via `cap_std::fs::Dir::open_ambient_dir` and
-//! kept as the sole authority handle. All subsequent path operations are
-//! resolved relative to that handle, so a malicious symlink or `..` smuggled
-//! through `SmbPath` cannot escape the sandbox; `cap-std` enforces this at
+//! The share root is opened once as a rooted directory handle and kept as the
+//! sole authority handle. All subsequent path operations are resolved
+//! relative to that handle, so a malicious symlink or `..` smuggled through
+//! `SmbPath` cannot escape the sandbox; the rooted layer enforces this at
 //! every step.
 //!
 //! - Blocking FS calls run on `tokio::task::spawn_blocking`.
 //! - `read_only()` flips a flag that makes write-class opens reject early
 //!   with `SmbError::AccessDenied`.
 //! - `list_dir` applies the MS-FSA 2.1.4.4 wildcards (`*`, `?`, `<`, `>`,
-//!   `"`) itself, since cap-std only provides raw `entries()`. Matching
+//!   `"`) itself, since the rooted layer only provides raw `entries()`. Matching
 //!   ignores case only where the host looks names up case-insensitively.
 //!   `"*.*"` matches every name, as `"*"` does.
 //! - Listings leave out names a client could not open again: names that are
@@ -25,10 +25,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::fs::rooted::{Dir, Metadata, OpenOptions as CapOpenOptions, ambient_authority};
 use async_trait::async_trait;
 use bytes::Bytes;
-use cap_std::ambient_authority;
-use cap_std::fs::{Dir, Metadata, OpenOptions as CapOpenOptions};
 use tokio::task::spawn_blocking;
 use tracing::debug;
 
@@ -667,11 +666,11 @@ fn is_hidden(name: &str, hidden: &str, case_sensitive: bool) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Convert a validated `SmbPath` into a relative `PathBuf` suitable for
-/// `cap_std::fs::Dir` lookups.
+/// `Dir` lookups.
 ///
 /// `SmbPath` is already validated (no `..`, no forbidden chars, no doubled
 /// separators), so this is purely a join. The empty `SmbPath` (root) yields
-/// `PathBuf::from(".")`, which cap-std accepts for `metadata` etc.
+/// `PathBuf::from(".")`, which `Dir` accepts for `metadata` etc.
 pub(super) fn to_rel_path(path: &SmbPath) -> PathBuf {
     if path.is_root() {
         return PathBuf::from(".");
@@ -754,15 +753,15 @@ fn write_at(file: &std::fs::File, data: &[u8], offset: u64) -> io::Result<usize>
 pub(super) fn file_key(md: &Metadata) -> Option<(u64, u64)> {
     #[cfg(unix)]
     {
-        use cap_std::fs::MetadataExt as _;
+        use crate::fs::rooted::MetadataExt as _;
         Some((md.dev(), md.ino()))
     }
     #[cfg(windows)]
     {
-        // The hidden trait returns `None` where `cap_fs_ext::MetadataExt` panics on scan metadata.
-        use cap_primitives::fs::_WindowsByHandle;
-        let volume = _WindowsByHandle::volume_serial_number(md)?;
-        let index = _WindowsByHandle::file_index(md)?;
+        // The trait returns `None` where other metadata extensions panic on scan metadata.
+        use crate::fs::rooted::WindowsByHandle as _;
+        let volume = md.volume_serial_number()?;
+        let index = md.file_index()?;
         Some((volume.into(), index))
     }
 }
@@ -789,12 +788,13 @@ pub(super) fn file_index(root_dev: Option<u64>, key: Option<(u64, u64)>) -> u64 
 pub(super) fn link_count(md: &Metadata) -> Option<u64> {
     #[cfg(unix)]
     {
-        use cap_std::fs::MetadataExt as _;
+        use crate::fs::rooted::MetadataExt as _;
         Some(md.nlink())
     }
     #[cfg(windows)]
     {
-        cap_primitives::fs::_WindowsByHandle::number_of_links(md).map(u64::from)
+        use crate::fs::rooted::WindowsByHandle as _;
+        md.number_of_links().map(u64::from)
     }
 }
 
@@ -811,7 +811,7 @@ fn is_dir_entry(md: &Metadata) -> bool {
     #[cfg(windows)]
     {
         const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
-        cap_std::fs::MetadataExt::file_attributes(md) & FILE_ATTRIBUTE_DIRECTORY != 0
+        crate::fs::rooted::MetadataExt::file_attributes(md) & FILE_ATTRIBUTE_DIRECTORY != 0
     }
 }
 
@@ -820,7 +820,7 @@ fn is_dir_entry(md: &Metadata) -> bool {
 /// file index, so the entry is opened for it, falling back to the scan data
 /// when the open fails.
 #[cfg_attr(unix, expect(unused_variables, reason = "dir is used on Windows only"))]
-fn entry_metadata(dir: &Dir, entry: &cap_std::fs::DirEntry) -> io::Result<Metadata> {
+fn entry_metadata(dir: &Dir, entry: &crate::fs::rooted::DirEntry) -> io::Result<Metadata> {
     #[cfg(unix)]
     {
         entry.metadata()
@@ -846,7 +846,6 @@ fn open_dir_handle(root: &Dir, rel: &Path, write_attributes: bool) -> io::Result
     }
     #[cfg(windows)]
     {
-        use cap_primitives::fs::OpenOptionsExt as _;
         const GENERIC_READ: u32 = 0x8000_0000;
         const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
@@ -964,7 +963,7 @@ pub(super) fn set_host_attributes(
         };
         match set(file) {
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                set(&super::windows_eas::reopen(file, FILE_WRITE_ATTRIBUTES)?)
+                set(&crate::fs::rooted::nt::reopen(file, FILE_WRITE_ATTRIBUTES)?)
             }
             result => result,
         }
@@ -1027,9 +1026,9 @@ pub(super) fn file_info_from_metadata(
 ) -> FileInfo {
     // Unix hosts report the size of a directory's index; clients expect 0.
     let len = if md.is_dir() { 0 } else { md.len() };
-    let modified = md.modified().ok().map(|t| t.into_std());
-    let accessed = md.accessed().ok().map(|t| t.into_std());
-    let created = md.created().ok().map(|t| t.into_std());
+    let modified = md.modified().ok();
+    let accessed = md.accessed().ok();
+    let created = md.created().ok();
 
     // A missing timestamp falls back to another available one, then to the
     // UNIX epoch.
@@ -1068,7 +1067,7 @@ fn host_attributes(md: &Metadata) -> u32 {
     }
     #[cfg(windows)]
     {
-        cap_std::fs::MetadataExt::file_attributes(md)
+        crate::fs::rooted::MetadataExt::file_attributes(md)
     }
 }
 
@@ -1076,7 +1075,7 @@ fn host_attributes(md: &Metadata) -> u32 {
 fn unix_mode(md: &Metadata) -> Option<u32> {
     #[cfg(unix)]
     {
-        use cap_std::fs::MetadataExt as _;
+        use crate::fs::rooted::MetadataExt as _;
         Some(md.mode())
     }
     #[cfg(not(unix))]
@@ -1170,14 +1169,18 @@ fn list_entries(
 /// [`FileInfo::ea_size`] of a listed entry with metadata `md`, as an open
 /// of its name sees it; 0 when it cannot be read.
 #[cfg(target_os = "linux")]
-fn listed_ea_size(dir: &Dir, entry: &cap_std::fs::DirEntry, name: &str, md: &Metadata) -> u32 {
+fn listed_ea_size(
+    dir: &Dir,
+    entry: &crate::fs::rooted::DirEntry,
+    name: &str,
+    md: &Metadata,
+) -> u32 {
     use super::eas::{Source, size};
     if !md.is_file() && !md.is_dir() {
         return 0;
     }
     let sized = if entry.file_type().is_ok_and(|ty| ty.is_symlink()) {
         // The target, opened without reading it, inside the share.
-        use cap_std::fs::OpenOptionsExt as _;
         let mut opts = CapOpenOptions::new();
         opts.read(true).custom_flags(libc::O_PATH);
         dir.open_with(name, &opts).and_then(|target| {
@@ -1200,7 +1203,7 @@ fn listed_ea_size(dir: &Dir, entry: &cap_std::fs::DirEntry, name: &str, md: &Met
 /// Metadata of a listed entry as an open of its name sees it: a symlink
 /// reports its target, or itself when the target cannot be reached inside
 /// the share.
-fn listed_metadata(dir: &Dir, entry: &cap_std::fs::DirEntry) -> io::Result<Metadata> {
+fn listed_metadata(dir: &Dir, entry: &crate::fs::rooted::DirEntry) -> io::Result<Metadata> {
     if entry.file_type()?.is_symlink()
         && let Ok(md) = dir.metadata(entry.file_name())
     {
@@ -1377,7 +1380,7 @@ impl LocalFsBackend {
         let existing = {
             let root = Arc::clone(&root);
             let rel = rel.clone();
-            spawn_blocking(move || -> io::Result<Option<cap_std::fs::FileType>> {
+            spawn_blocking(move || -> io::Result<Option<crate::fs::rooted::FileType>> {
                 match root.metadata(&rel) {
                     Ok(md) => Ok(Some(md.file_type())),
                     Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -1514,10 +1517,9 @@ impl LocalFsBackend {
 
 /// True for a FIFO, a socket or a device node. Opening one can block or
 /// act on a device, so such entries are refused before any open.
-fn is_special(ty: &cap_std::fs::FileType) -> bool {
+fn is_special(ty: &crate::fs::rooted::FileType) -> bool {
     #[cfg(unix)]
     {
-        use cap_std::fs::FileTypeExt as _;
         ty.is_fifo() || ty.is_socket() || ty.is_char_device() || ty.is_block_device()
     }
     #[cfg(windows)]
@@ -1557,7 +1559,11 @@ fn open_to_smb(e: io::Error) -> SmbError {
 /// name a FIFO, a socket or a device node took since it was checked fails
 /// as changed, so the open is looked at again.
 #[cfg(unix)]
-fn open_with(root: &Dir, rel: &Path, options: &CapOpenOptions) -> io::Result<cap_std::fs::File> {
+fn open_with(
+    root: &Dir,
+    rel: &Path,
+    options: &CapOpenOptions,
+) -> io::Result<crate::fs::rooted::File> {
     root.open_with(rel, options).map_err(|e| {
         if root
             .metadata(rel)
@@ -1571,7 +1577,11 @@ fn open_with(root: &Dir, rel: &Path, options: &CapOpenOptions) -> io::Result<cap
 }
 
 #[cfg(windows)]
-fn open_with(root: &Dir, rel: &Path, options: &CapOpenOptions) -> io::Result<cap_std::fs::File> {
+fn open_with(
+    root: &Dir,
+    rel: &Path,
+    options: &CapOpenOptions,
+) -> io::Result<crate::fs::rooted::File> {
     root.open_with(rel, options)
 }
 
@@ -1601,7 +1611,7 @@ fn open_file(
     root: &Dir,
     rel: &Path,
     opts: OpenOptions,
-) -> io::Result<(cap_std::fs::File, OpenAction)> {
+) -> io::Result<(crate::fs::rooted::File, OpenAction)> {
     let existing = existing_file_options(&opts);
     let mut created = CapOpenOptions::new();
     created.read(opts.read).write(true).create_new(true);
@@ -1613,7 +1623,6 @@ fn open_file(
     truncated.truncate(true);
     #[cfg(unix)]
     for options in [&mut created, &mut truncated] {
-        use cap_std::fs::OpenOptionsExt as _;
         options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
     }
     let not_found = |e: &io::Error| e.kind() == io::ErrorKind::NotFound;
@@ -1744,14 +1753,13 @@ fn open_file_nofollow(
     Ok((file, action))
 }
 
-/// cap-std options that open an existing file with the access `opts` asks
-/// for, and on Unix without blocking.
+/// Options that open an existing file with the access `opts` asks for, and
+/// on Unix without blocking.
 fn existing_file_options(opts: &OpenOptions) -> CapOpenOptions {
     let mut cap_opts = CapOpenOptions::new();
     cap_opts.read(true).write(opts.write);
     #[cfg(unix)]
     {
-        use cap_std::fs::OpenOptionsExt as _;
         cap_opts.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
     }
     // Unix sets times and permissions through a read-only descriptor.
@@ -1759,7 +1767,6 @@ fn existing_file_options(opts: &OpenOptions) -> CapOpenOptions {
     // write access.
     #[cfg(windows)]
     if opts.write_attributes && !opts.write {
-        use cap_primitives::fs::OpenOptionsExt as _;
         const GENERIC_READ: u32 = 0x8000_0000;
         const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
         cap_opts.access_mode(GENERIC_READ | FILE_WRITE_ATTRIBUTES);
@@ -2052,8 +2059,8 @@ impl LocalFsBackend {
 // Handle
 // ---------------------------------------------------------------------------
 
-/// Internal handle variant. `File` carries a `std::fs::File` (after cap-std
-/// has done the safe open); `Dir` keeps the `cap_std::fs::Dir` for listing
+/// Internal handle variant. `File` carries a `std::fs::File` (after the
+/// rooted layer has done the safe open); `Dir` keeps the `Dir` for listing
 /// and setting times.
 enum LocalHandle {
     File {
