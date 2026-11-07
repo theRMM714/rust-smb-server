@@ -19,9 +19,9 @@ use std::os::unix::fs::FileExt as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::fs::rooted::{Dir, Metadata};
 use async_trait::async_trait;
 use bytes::Bytes;
-use cap_std::fs::{Dir, Metadata};
 use tokio::task::spawn_blocking;
 use tracing::debug;
 

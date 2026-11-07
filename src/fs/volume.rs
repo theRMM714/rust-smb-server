@@ -3,7 +3,7 @@
 
 use std::io;
 
-use cap_std::fs::Dir;
+use crate::fs::rooted::Dir;
 
 use crate::backend::VolumeInfo;
 

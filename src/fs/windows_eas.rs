@@ -3,27 +3,26 @@
 //!
 //! The extended attributes of a file or directory are its NTFS extended
 //! attributes, read with `NtQueryEaFile` and written with `NtSetEaFile`
-//! through a second handle of the file, opened relative to the one cap-std
-//! opened inside the share. NTFS keeps names in uppercase, compares them
-//! without regard to case and applies a set as a whole or not at all.
+//! through a second handle of the file, opened relative to the one the
+//! rooted layer opened inside the share. NTFS keeps names in uppercase,
+//! compares them without regard to case and applies a set as a whole or not
+//! at all.
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::io;
-use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
+use std::os::windows::io::AsRawHandle as _;
 
-use cap_std::fs::Dir;
-use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use crate::fs::rooted::Dir;
+use crate::fs::rooted::nt;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT, FileEaInformation,
-    FileFullDirectoryInformation, NtCreateFile, NtQueryDirectoryFile, NtQueryEaFile,
+    FileEaInformation, FileFullDirectoryInformation, NtQueryDirectoryFile, NtQueryEaFile,
     NtQueryInformationFile, NtSetEaFile,
 };
-use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS, RtlNtStatusToDosError, UNICODE_STRING};
+use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS, UNICODE_STRING};
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
-    FILE_READ_EA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_EA,
-    GetVolumeInformationByHandleW, SYNCHRONIZE,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_EA,
+    FILE_WRITE_EA, GetVolumeInformationByHandleW,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -82,11 +81,7 @@ fn nt_error(status: NTSTATUS) -> io::Error {
         STATUS_EA_TOO_LARGE | STATUS_EAS_NOT_SUPPORTED | STATUS_INVALID_EA_NAME => {
             io::Error::other(NtStatus(status))
         }
-        _ => {
-            // SAFETY: a pure conversion of a status code.
-            let code = unsafe { RtlNtStatusToDosError(status) };
-            io::Error::from_raw_os_error(code as i32)
-        }
+        _ => nt::nt_error(status),
     }
 }
 
@@ -115,69 +110,12 @@ fn to_smb(e: io::Error) -> SmbError {
     }
 }
 
-/// A second handle of the file or directory `file` is open on, with
-/// `access`.
-pub(super) fn reopen(file: &File, access: u32) -> io::Result<File> {
-    let empty = UNICODE_STRING {
-        Length: 0,
-        MaximumLength: 0,
-        Buffer: std::ptr::null_mut(),
-    };
-    let attributes = OBJECT_ATTRIBUTES {
-        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
-        RootDirectory: file.as_raw_handle() as HANDLE,
-        ObjectName: &empty,
-        Attributes: 0,
-        SecurityDescriptor: std::ptr::null(),
-        SecurityQualityOfService: std::ptr::null(),
-    };
-    let mut handle: HANDLE = std::ptr::null_mut();
-    let mut status_block = IO_STATUS_BLOCK::default();
-    // SAFETY: `attributes` is a live local naming the live local `empty`,
-    // and its root is the open handle `file` holds; the call writes only
-    // `handle` and `status_block`.
-    let status = unsafe {
-        NtCreateFile(
-            &mut handle,
-            access | SYNCHRONIZE,
-            &attributes,
-            &mut status_block,
-            std::ptr::null(),
-            FILE_ATTRIBUTE_NORMAL,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            FILE_OPEN,
-            FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
-            std::ptr::null(),
-            0,
-        )
-    };
-    if status < 0 {
-        return Err(nt_error(status));
-    }
-    // SAFETY: the call succeeded, so `handle` is an open handle that
-    // nothing else owns.
-    Ok(unsafe { File::from_raw_handle(handle as _) })
-}
-
-/// A buffer of `len` bytes aligned to 8, as the calls that fill or read
-/// FILE_FULL_EA_INFORMATION and FILE_FULL_DIR_INFORMATION entries need.
-fn aligned(len: usize) -> Vec<u64> {
-    vec![0; len.div_ceil(8)]
-}
-
-/// The first `len` bytes of `words`.
-fn bytes_of(words: &[u64], len: usize) -> Vec<u8> {
-    let mut out: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
-    out.truncate(len);
-    out
-}
-
 /// The FILE_FULL_EA_INFORMATION list of every attribute of `file`.
 fn query(file: &File) -> io::Result<Vec<u8>> {
-    let handle = reopen(file, FILE_READ_EA)?;
+    let handle = nt::reopen(file, FILE_READ_EA)?;
     let mut len = 1 << 17;
     loop {
-        let mut buf = aligned(len);
+        let mut buf = nt::aligned(len);
         let mut status_block = IO_STATUS_BLOCK::default();
         // SAFETY: `buf` is a live buffer of at least `len` bytes, aligned
         // to 8 as a `u64` buffer is, and `status_block` a live local; no
@@ -199,7 +137,7 @@ fn query(file: &File) -> io::Result<Vec<u8>> {
             STATUS_NO_EAS_ON_FILE => return Ok(Vec::new()),
             STATUS_BUFFER_OVERFLOW if len < MAX_LIST => len *= 2,
             s if s < 0 => return Err(nt_error(s)),
-            _ => return Ok(bytes_of(&buf, status_block.Information.min(len))),
+            _ => return Ok(nt::bytes_of(&buf, status_block.Information.min(len))),
         }
     }
 }
@@ -270,9 +208,9 @@ pub(super) fn size(file: &File) -> io::Result<u32> {
 /// Sets, replaces or, with an empty value, removes each of `eas` on the
 /// file `file` is open on, all or none.
 pub(super) fn set(file: &File, eas: &[Ea]) -> Result<(), SmbError> {
-    let handle = reopen(file, FILE_WRITE_EA).map_err(to_smb)?;
+    let handle = nt::reopen(file, FILE_WRITE_EA).map_err(to_smb)?;
     let list = ea::encode_full_list(eas);
-    let mut buf = aligned(list.len());
+    let mut buf = nt::aligned(list.len());
     for (word, chunk) in buf.iter_mut().zip(list.chunks(8)) {
         let mut bytes = [0; 8];
         bytes[..chunk.len()].copy_from_slice(chunk);
@@ -305,7 +243,7 @@ pub(super) fn listing_sizes(
     pattern: Option<&str>,
 ) -> io::Result<HashMap<String, Option<u32>>> {
     let dir = super::local::dir_as_file(dir)?;
-    let handle = reopen(&dir, FILE_LIST_DIRECTORY)?;
+    let handle = nt::reopen(&dir, FILE_LIST_DIRECTORY)?;
     let mut units: Vec<u16> = pattern.unwrap_or("").encode_utf16().collect();
     let bytes = u16::try_from(units.len() * 2).map_err(|_| io::ErrorKind::InvalidFilename)?;
     let filter = UNICODE_STRING {
@@ -314,7 +252,7 @@ pub(super) fn listing_sizes(
         Buffer: units.as_mut_ptr(),
     };
     let mut out = HashMap::new();
-    let mut buf = aligned(LISTING);
+    let mut buf = nt::aligned(LISTING);
     let mut first = true;
     loop {
         let mut status_block = IO_STATUS_BLOCK::default();
@@ -346,7 +284,7 @@ pub(super) fn listing_sizes(
             s if s < 0 => return Err(nt_error(s)),
             _ => {}
         }
-        let listed = bytes_of(&buf, status_block.Information.min(LISTING));
+        let listed = nt::bytes_of(&buf, status_block.Information.min(LISTING));
         let mut at = 0usize;
         while let Some(entry) = listed.get(at..at + DIR_NAME) {
             let field = |off: usize| {
@@ -381,9 +319,8 @@ pub(super) fn listing_sizes(
 /// `dir`, opened as a CREATE opens it, following a reparse point inside
 /// the share.
 pub(super) fn entry_size(dir: &Dir, name: &str) -> io::Result<u32> {
-    use cap_primitives::fs::OpenOptionsExt as _;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    let mut opts = cap_std::fs::OpenOptions::new();
+    let mut opts = crate::fs::rooted::OpenOptions::new();
     opts.read(true)
         .access_mode(FILE_READ_ATTRIBUTES)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);

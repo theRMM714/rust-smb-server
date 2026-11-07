@@ -9,7 +9,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
-use cap_std::fs::{Dir, Metadata, OpenOptions as CapOpenOptions};
+use crate::fs::rooted::{Dir, Metadata, OpenOptions as CapOpenOptions};
 use tracing::debug;
 
 use super::local::{file_key, special_file};
@@ -100,7 +100,6 @@ pub(super) fn open_base(
     rel: &Path,
     write: bool,
 ) -> io::Result<(File, Metadata, (u64, u64))> {
-    use cap_std::fs::OpenOptionsExt as _;
     let mut opts = CapOpenOptions::new();
     opts.read(true)
         .write(write)
@@ -117,7 +116,6 @@ pub(super) fn open_base(
 /// nothing else is opened.
 #[cfg(target_os = "linux")]
 pub(super) fn open_entry(dir: &Dir, name: &str) -> io::Result<(File, (u64, u64))> {
-    use cap_std::fs::OpenOptionsExt as _;
     use rustix::fs::{Mode, OFlags};
     use std::os::fd::AsRawFd as _;
     if !is_valid_component(name) {
