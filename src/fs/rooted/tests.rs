@@ -270,3 +270,57 @@ mod windows {
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 }
+
+/// Removal, rename and creation on a UNC root (the case that used to break
+/// when a handle's path was turned back into a string).
+///
+/// Skipped unless SOLOMNI_UNC_ROOT names a writable UNC directory.
+#[test]
+fn works_on_a_unc_root() {
+    let Ok(base) = std::env::var("SOLOMNI_UNC_ROOT") else {
+        return;
+    };
+    let path = std::path::PathBuf::from(base).join(format!("rooted-probe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("x.txt"), b"hi").unwrap();
+
+    let dir = Dir::open_ambient_dir(&path, ambient_authority()).unwrap();
+    println!("before: {:?}", names(&dir));
+
+    dir.create_dir("d").unwrap();
+    let mut file = dir.open_with("d/f", &create_options()).unwrap();
+    file.write_all(b"hello").unwrap();
+    drop(file);
+    dir.rename("d/f", &dir, "d/g").unwrap();
+    println!("after create/rename: {:?}", names(&dir));
+
+    dir.remove_file("d/g").unwrap();
+    println!("after remove_file: {:?}", names(&dir));
+    let host: Vec<String> = std::fs::read_dir(&path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    println!("host sees: {:?}", host);
+    let inside_d: Vec<String> = std::fs::read_dir(path.join("d"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    println!("host sees in d: {:?}", inside_d);
+    assert!(
+        inside_d.is_empty(),
+        "remove_file left something in d: {:?}",
+        inside_d
+    );
+
+    dir.remove_dir("d").unwrap();
+    dir.remove_file("x.txt").unwrap();
+    let host: Vec<String> = std::fs::read_dir(&path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    println!("host sees after all: {:?}", host);
+    assert!(host.is_empty(), "root should be empty: {:?}", host);
+    drop(dir);
+    let _ = std::fs::remove_dir_all(&path);
+}

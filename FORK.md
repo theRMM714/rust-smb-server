@@ -61,8 +61,10 @@
 2. Windows 不再特判 DOS 设备名（`CON` / `PRN` / `AUX` / `NUL` / `COM0-9` / `LPT0-9`）。
    `cap-std` 对这些名字直接返回 `ERROR_FILE_NOT_FOUND`；本层把它们当根内的普通名字——相对
    句柄打开不会落到设备对象上，行为与 unix 一致。
-3. Windows 的删除用 `FileDispositionInfoEx` 加 `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS`：
-   名字立刻消失，另一个句柄仍打开也不影响，和 Unix、SMB 客户端看到的一致。`cap-std` 走
+3. Windows 的删除先用 `FileDispositionInfoEx` 加 `FILE_DISPOSITION_FLAG_POSIX_SEMANTICS`：
+   名字立刻消失，另一个句柄仍打开也不影响，和 Unix、SMB 客户端看到的一致。共享（网络重定向器）
+   对这套 flag 可能回 `ERROR_INVALID_PARAMETER` / `ERROR_NOT_SUPPORTED`，这时退回
+   `FileDispositionInfo` 的 delete-on-close（句柄关闭时完成删除）。`cap-std` 走
    `DeleteFileW` / `RemoveDirectoryW`，被别处打开的目录会留到最后一个句柄关闭；不用
    `FILE_DELETE_ON_CLOSE` 是因为它会吞掉删除失败（例如目录非空），上游
    `unlink_file_then_nonempty_dir_errors` 依赖这个错误。

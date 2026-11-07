@@ -28,10 +28,10 @@ use windows_sys::Win32::Foundation::{FILETIME, GENERIC_READ, GENERIC_WRITE, HAND
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_READONLY,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
-    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_GENERIC_WRITE,
-    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_TRAVERSE, FILE_WRITE_DATA, FileDispositionInfoEx, GetFileInformationByHandle,
-    SetFileInformationByHandle,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
+    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_WRITE_DATA, FileDispositionInfo, FileDispositionInfoEx,
+    GetFileInformationByHandle, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
@@ -57,6 +57,9 @@ const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 
 /// ERROR_FILE_NOT_FOUND: the name does not exist.
 const ERROR_FILE_NOT_FOUND: i32 = 2;
+
+/// ERROR_NOT_SUPPORTED: a share does not implement the POSIX delete flags.
+const ERROR_NOT_SUPPORTED: i32 = 50;
 
 /// ERROR_PATH_NOT_FOUND: a directory of the path does not exist.
 const ERROR_PATH_NOT_FOUND: i32 = 3;
@@ -1087,10 +1090,33 @@ fn delete(file: &fs::File) -> io::Result<()> {
             std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
         )
     };
-    if ok == 0 {
-        return Err(io::Error::last_os_error());
+    if ok != 0 {
+        return Ok(());
     }
-    Ok(())
+    let err = io::Error::last_os_error();
+    // A network share reached through the SMB redirector rejects the POSIX
+    // flag with ERROR_INVALID_PARAMETER / ERROR_NOT_SUPPORTED; the same share
+    // does honor delete-on-close, which the caller's close then completes.
+    if matches!(
+        err.raw_os_error(),
+        Some(ERROR_INVALID_PARAMETER) | Some(ERROR_NOT_SUPPORTED)
+    ) {
+        let plain = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // SAFETY: `plain` is a live local of the size passed, `file` is open.
+        let ok = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle() as HANDLE,
+                FileDispositionInfo,
+                (&raw const plain).cast(),
+                std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return Ok(());
+    }
+    Err(err)
 }
 
 /// Renames the file `file` is open on to `to` in `to_dir`, replacing an
