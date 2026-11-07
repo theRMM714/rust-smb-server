@@ -238,7 +238,15 @@ impl Dir {
     /// The entries, excluding `.` and `..`.
     pub fn entries(&self) -> io::Result<Entries> {
         let dir = Arc::new(self.try_clone()?);
-        let mut reader = RawDir::read_from(&self.file)?;
+        // The handle may be an `O_PATH` one, which cannot be read, so list
+        // through a descriptor opened for reading.
+        let readable = rustix::fs::openat(
+            &self.file,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let mut reader = RawDir::read_from(&readable)?;
         let mut entries = Vec::new();
 
         for entry in reader.by_ref() {
@@ -700,6 +708,11 @@ impl Metadata {
     // used here, so the casts are needed there and redundant on Linux.
     #[allow(clippy::unnecessary_cast)]
     fn from_stat(stat: &rustix::fs::Stat) -> io::Result<Self> {
+        #[cfg(target_os = "macos")]
+        let birth = Some((stat.st_birthtime as i64, stat.st_birthtime_nsec as i64));
+        #[cfg(not(target_os = "macos"))]
+        let birth = None;
+
         Ok(Self {
             file_type: FileType {
                 raw: RawFileType::from_raw_mode(stat.st_mode as _),
@@ -710,7 +723,7 @@ impl Metadata {
             },
             atime: (stat.st_atime as i64, stat.st_atime_nsec as i64),
             mtime: (stat.st_mtime as i64, stat.st_mtime_nsec as i64),
-            birth: None,
+            birth,
             dev: stat.st_dev as u64,
             ino: stat.st_ino as u64,
             nlink: stat.st_nlink as u64,
@@ -889,16 +902,29 @@ impl Permissions {
 ///
 /// A handle to the opened directory.
 fn open_dir_at(dir: &Dir, name: &OsStr) -> io::Result<Dir> {
-    let fd = rustix::fs::openat(
-        &dir.file,
-        name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
+    let fd = rustix::fs::openat(&dir.file, name, dir_flags(), Mode::empty())?;
 
     Ok(Dir {
         file: fs::File::from(fd),
     })
+}
+
+/// Flags for opening a directory that is only used as a base for further
+/// operations.
+///
+/// Where the host has `O_PATH`, the descriptor needs no read permission on the
+/// directory, which is what lets the server reach entries of a directory it may
+/// only traverse. `entries` opens a second descriptor when it has to read them.
+fn dir_flags() -> OFlags {
+    #[cfg(any(target_os = "android", target_os = "freebsd", target_os = "linux"))]
+    {
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "freebsd", target_os = "linux")))]
+    {
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
+    }
 }
 
 /// Reads metadata relative to a directory.
