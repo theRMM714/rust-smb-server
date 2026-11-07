@@ -66,6 +66,7 @@ impl Dir {
     /// # Returns
     ///
     /// A handle to the directory.
+    #[cfg(target_os = "linux")]
     pub fn from_std_file(file: fs::File) -> Self {
         Self { file }
     }
@@ -202,6 +203,7 @@ impl Dir {
     /// # Arguments
     ///
     /// * `path` - Path relative to this directory.
+    #[cfg(target_os = "linux")]
     pub fn remove_dir_all(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let (parent, name) = self.resolve(path.as_ref(), false)?;
         remove_tree(&parent.open_dir(&name)?)?;
@@ -315,8 +317,14 @@ impl Dir {
                     stack.push(cur);
                     cur = next;
                 }
-                Err(error) if is_not_a_directory(&error) => {
-                    let metadata = metadata_at(&cur, &name, AtFlags::SYMLINK_NOFOLLOW)?;
+                Err(error) if is_not_a_directory(&error) || (is_last && is_missing(&error)) => {
+                    let metadata = match metadata_at(&cur, &name, AtFlags::SYMLINK_NOFOLLOW) {
+                        Ok(metadata) => metadata,
+                        // A name that does not exist is handed to the caller,
+                        // which is the only place that may create it.
+                        Err(error) if is_last && is_missing(&error) => return Ok((cur, name)),
+                        Err(error) => return Err(error),
+                    };
 
                     if metadata.is_symlink() {
                         followed += 1;
@@ -912,6 +920,7 @@ fn open_dir_at(dir: &Dir, name: &OsStr) -> io::Result<Dir> {
 /// # Returns
 ///
 /// The error of the first entry that could not be removed.
+#[cfg(target_os = "linux")]
 fn remove_tree(dir: &Dir) -> io::Result<()> {
     for entry in dir.entries()? {
         let entry = entry?;
@@ -1006,6 +1015,11 @@ fn is_not_a_directory(error: &io::Error) -> bool {
         error.raw_os_error(),
         Some(code) if code == Errno::NOTDIR.raw_os_error() || code == Errno::LOOP.raw_os_error()
     )
+}
+
+/// Reports whether an error means the name does not exist.
+fn is_missing(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(Errno::NOENT.raw_os_error())
 }
 
 /// Creates the error used when a path would leave the root.

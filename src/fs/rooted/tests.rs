@@ -179,6 +179,7 @@ mod unix {
         assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn removes_a_tree() {
         let td = tempfile::tempdir().unwrap();

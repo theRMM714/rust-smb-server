@@ -53,8 +53,8 @@
 
 ### 行为差异（相对 `cap-std`）
 
-1. API 面按本仓的实际调用裁剪，只在用到的平台提供：`unix.rs` 有 `open` / `open_dir` /
-   `remove_dir_all`，`windows.rs` 没有它们；`OpenOptions` 只有
+1. API 面按本仓的实际调用裁剪，只在用到的平台提供：`unix.rs` 有 `open` / `open_dir`，
+   Linux 另有 `from_std_file` / `remove_dir_all`，`windows.rs` 没有它们；`OpenOptions` 只有
    `read` / `write` / `truncate` / `create_new` / `custom_flags`，Windows 另有
    `access_mode`，没有 `append` / `create` / `follow`。上游新版本用到被裁掉的方法时会在编译期
    报错，按需补回即可。
